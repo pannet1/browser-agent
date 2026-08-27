@@ -57,7 +57,8 @@ class ViewportStream:
         try:
             png = await page.screenshot(full_page=False)  # type: ignore[attr-defined]
             b64 = base64.b64encode(png).decode() if isinstance(png, (bytes, bytearray)) else ""
-        except Exception:
+        except Exception as e:
+            logger.info(f"Screenshot failed: {e}")
             b64 = ""
         try:
             ax = await page.accessibility.snapshot()  # type: ignore[attr-defined]
@@ -78,5 +79,5 @@ class ViewportStream:
         if action == "type":
             return await relay_type(page, parsed["text"])
         if action == "scroll":
-            return await relay_scroll(page, parsed["delta_y"])
+            return await relay_scroll(page, parsed["delta_y"], parsed.get("x"), parsed.get("y"))
         return {"status": "unknown", "event": event}

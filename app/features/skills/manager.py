@@ -107,6 +107,17 @@ def update_last_active(skill_id: str, last_url: str = "") -> None:
     (_skill_dir(skill_id) / "meta.json").write_text(json.dumps(meta, indent=2))
 
 
+def rename_skill(skill_id: str, name: str) -> dict[str, Any] | None:
+    meta = get_skill(skill_id)
+    clean_name = name.strip()
+    if not meta or not clean_name:
+        return None
+    meta["name"] = clean_name
+    (_skill_dir(skill_id) / "meta.json").write_text(json.dumps(meta, indent=2))
+    logger.info(f"renamed skill {skill_id} -> {clean_name}")
+    return meta
+
+
 def get_shared_paths(target_domain: str) -> dict[str, Path]:
     sd = _shared_dir(target_domain)
     return {"storage": sd / "storageState.json", "creds": sd / "credentials.json", "dir": sd}

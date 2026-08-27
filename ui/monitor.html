@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>browser-agent — Live Monitor</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font:12px/1.5 ui-monospace,monospace;background:#0a0c10;color:#cbd5e1;padding:12px}
+  h1{font-size:14px;color:#e2e8f0;margin-bottom:8px}
+  #log{height:85vh;overflow:auto;background:#11141c;border:1px solid #1e293b;border-radius:8px;padding:8px}
+  .e{padding:4px 6px;border-left:2px solid #1e293b;margin-bottom:6px;background:#171a21;border-radius:4px;white-space:pre-wrap;word-break:break-all}
+  .e.RUNNING{border-left-color:#3b82f6}
+  .e.IDLE{border-left-color:#22c55e}
+  .e.PAUSED{border-left-color:#f59e0b}
+  .e.FAILED{border-left-color:#ef4444}
+  .meta{color:#64748b;font-size:11px}
+</style>
+</head>
+<body>
+<h1>Live Monitor — Server + Agent <span id="status" style="color:#64748b">connecting…</span></h1>
+<div id="log"></div>
+<script>
+const logEl=document.getElementById('log');
+const statusEl=document.getElementById('status');
+const seen=new Set();
+function add(e){
+  const key=JSON.stringify(e);
+  if(seen.has(key)) return;
+  seen.add(key);
+  if(seen.size>2000) seen.clear();
+  const d=document.createElement('div');
+  d.className='e '+(e.state||'');
+  const ts=e.ts? new Date(e.ts).toLocaleTimeString() : new Date().toLocaleTimeString();
+  d.innerHTML=`<div class="meta">[${ts}] ${e.state||''} ${e.skill_id||''} ${e.target_domain||''} ${e.action||''}</div><div>${(e.thought||JSON.stringify(e)).slice(0,600)}</div>`;
+  logEl.appendChild(d);
+  logEl.scrollTop=logEl.scrollHeight;
+}
+function addRuntime(line){ add({state:'SERVER',thought:line}); }
+const proto=location.protocol==='https:'?'wss:':'ws:';
+function connect(){
+  const ws=new WebSocket(`${proto}//${location.host}/ws/monitor`);
+  ws.onopen=()=>{statusEl.textContent='connected'; statusEl.style.color='#22c55e'; add({state:'IDLE',thought:'monitor connected'})};
+  ws.onmessage=(ev)=>{ try{ add(JSON.parse(ev.data)) }catch{ add({thought:ev.data}) } };
+  ws.onclose=()=>{statusEl.textContent='reconnecting…'; statusEl.style.color='#f59e0b'; setTimeout(connect,1000);};
+  ws.onerror=()=>{statusEl.textContent='reconnecting…'; statusEl.style.color='#f59e0b';};
+}
+connect();
+
+// The event feed reflects exactly what the right activity pane emits. The
+// runtime feed mirrors Uvicorn/application messages printed in the terminal.
+async function poll(){
+  try{
+    const r=await fetch('/api/logs?lines=20');
+    const j=await r.json();
+    if(j.logs) j.logs.forEach(add);
+  }catch{}
+  try{
+    const r=await fetch('/api/runtime-logs?lines=40');
+    const j=await r.json();
+    if(j.logs) j.logs.forEach(addRuntime);
+  }catch{}
+}
+poll();
+setInterval(poll,2000);
+</script>
+</body>
+</html>

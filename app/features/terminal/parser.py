@@ -9,6 +9,7 @@ logger = logging_func(__name__)
 
 DOMAIN_RE = re.compile(r"([a-z0-9.-]+\.[a-z]{2,})", re.IGNORECASE)
 HACKER_RE = re.compile(r"hacker\s*news", re.I)
+WIKI_RE = re.compile(r"wikipedia", re.I)
 
 
 def extract_domain(text: str) -> str:
@@ -41,8 +42,14 @@ def dispatch(
     lowered = instruction.lower()
     if not domain and HACKER_RE.search(instruction):
         domain = "news.ycombinator.com"
+    if not domain and WIKI_RE.search(instruction):
+        domain = "en.wikipedia.org"
     if not domain and "facebook" in lowered:
         domain = "facebook.com"
+    if not domain and "irctc" in lowered:
+        domain = "irctc.co.in"
+    if not domain and "example" in lowered:
+        domain = "example.com"
     if not domain:
         for s in existing_skills:
             base = s.get("target_domain","").split(".")[0].lower()
@@ -53,8 +60,13 @@ def dispatch(
     if HACKER_RE.search(instruction):
         name = "hacker news"
         domain = "news.ycombinator.com"
-    if "facebook" in lowered and not domain:
+    elif WIKI_RE.search(instruction):
+        name = "wikipedia python" if "python" in lowered else "wikipedia"
+        domain = "en.wikipedia.org"
+    elif "facebook" in lowered and not domain:
         domain = "facebook.com"
+    elif "irctc" in lowered and not domain:
+        domain = "irctc.co.in"
     if not domain:
         for s in existing_skills:
             if s.get("name","").lower() in instruction.lower():

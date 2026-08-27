@@ -17,13 +17,21 @@ async def pre_inject(page: Any, target_domain: str, vault: CredentialVault | Non
     username = creds.get("username", "")
     password = creds.get("password", "")
     logger.info(f"inject for {target_domain}")
-    for sel in ["input[type='password']", "input[name='password']", "#password"]:
+    for sel in ["input[formcontrolname='password']", "input[type='password']", "input[name='password']", "#password"]:
         try:
             await page.fill(sel, password, timeout=1000)
             break
         except Exception:
             continue
-    for sel in ["input[type='text']", "input[name='username']", "#username", "input[name='email']", "input[type='email']"]:
+    for sel in [
+        "input[formcontrolname='userid']",
+        "input[name='username']",
+        "#username",
+        "input[placeholder*='User']",
+        "input[type='text']",
+        "input[name='email']",
+        "input[type='email']",
+    ]:
         try:
             if username:
                 await page.fill(sel, username, timeout=1000)

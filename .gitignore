@@ -1,5 +1,6 @@
 .agents/
 data/
+scratch/
 .venv/
 __pycache__/
 *.pyc
@@ -9,3 +10,4 @@ __pycache__/
 .orchestrator/
 .DS_Store
 .agents
+\n# Media / Screenshots (potentially sensitive visual data)\n*.png\n*.jpg\n*.jpeg\n*.gif\n*.webp\n\n# Debug & Scratch Scripts\ntest_*.py\nscratch_*.py\nget_frame.py\ndraw_dot.py\nlocate_button.py\n\n# Logs\n*.log
