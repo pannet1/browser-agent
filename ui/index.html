@@ -15,7 +15,7 @@
   #left { border-right: 1px solid var(--border); }
   #center { border-left: 0; border-right: 0; }
   #right { border-left: 1px solid var(--border); }
-  #bottom { grid-column: 1 / -1; border-top: 1px solid var(--border); background: #10131a; padding: 10px 12px; display: flex; gap: 8px; align-items: center; }
+  #bottom { grid-column: 1 / -1; border-top: 1px solid var(--border); background: #10131a; padding: 0; display: flex; }
   .pane-head { padding: 10px 12px; font-weight: 600; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
   .pane-head button { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 2px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; }
   .pane-head button:hover { color: var(--text); border-color: #2f354d; }
@@ -24,19 +24,18 @@
   .skill.active { border-color: var(--accent); background: #1e2a4a; }
   .skill .name { font-weight: 600; }
   .skill .domain { font-size: 12px; color: var(--muted); }
-  #center-body { flex:1; display:flex; align-items:center; justify-content:center; background: #0b0d12; position: relative; border-top: 1px solid var(--border); }
-  #center-body canvas { width: 90%; height: 90%; border: 1px dashed #2a3048; border-radius: 12px; background: #0f1220; display:flex; }
+  #center-body { flex:1; display:flex; align-items:center; justify-content:center; background: #0b0d12; position: relative; border-top: 1px solid var(--border); overflow:hidden; }
   #center-placeholder { color: var(--muted); text-align:center; padding: 24px; }
   #center-placeholder b { color: var(--text); }
+  #viewport-img { max-width: 100%; max-height: 100%; object-fit: contain; display:none; border: 1px solid #1f2438; border-radius: 8px; cursor: crosshair; }
+  #viewport-img.active { display:block; }
   #activity { flex:1; overflow:auto; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; }
   .log { padding: 6px 8px; border-left: 2px solid #2a3048; margin-bottom: 8px; background: #1a1e2e; border-radius: 6px; }
   .log.thought { border-left-color: var(--accent); }
   .log.action { border-left-color: var(--accent2); }
   .log.correction { border-left-color: #f59e0b; }
-  #bottom input { flex:1; background: #171a21; border: 1px solid var(--border); color: var(--text); padding: 10px 12px; border-radius: 8px; outline: none; }
-  #bottom input:focus { border-color: var(--accent); }
-  #bottom button { background: var(--accent); color: white; border:0; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: 600; }
-  #bottom button:hover { filter: brightness(1.1); }
+  #bottom textarea { flex:1; width:100%; background: transparent; border:0; color: var(--text); padding: 14px 16px; outline: none; resize: none; min-height: 48px; max-height: 160px; overflow-y: auto; font-size: 14px; line-height: 1.6; }
+  #bottom textarea::placeholder { color: var(--muted); }
   #toggle-bottom { position: fixed; bottom: 8px; right: 12px; z-index: 9; background: #1c2030; border:1px solid var(--border); color:var(--muted); padding:6px 10px; border-radius:999px; cursor:pointer; font-size:12px; }
   #toggle-bottom:hover { color: var(--text); }
 </style>
@@ -54,6 +53,7 @@
         <b id="center-title">Select a skill</b>
         <div style="margin-top:6px; color:var(--muted);">CDP canvas — Playwright viewport streams here.<br/>Click/type directly to handle captcha/OTP, agent resumes.</div>
       </div>
+      <img id="viewport-img" alt="viewport" />
     </div>
   </div>
   <div id="right" class="pane">
@@ -61,8 +61,7 @@
     <div id="activity"></div>
   </div>
   <div id="bottom" class="pane">
-    <input id="prompt" placeholder="login to irctc.co.in and book a ticket..." />
-    <button id="send">Send</button>
+    <textarea id="prompt" rows="1" placeholder="login to irctc.co.in and book a ticket...  — Enter to send, Ctrl+Enter / Shift+Enter for new line"></textarea>
   </div>
 </div>
 <button id="toggle-bottom" title="Hide/unhide bottom to reclaim height">↕ bottom</button>
@@ -72,6 +71,7 @@ const skills = [
   { id: "gmail-inbox", name: "gmail inbox", domain: "mail.google.com" },
 ];
 let active = skills[0].id;
+let pendingInstruction = null;
 const listEl = document.getElementById('skill-list');
 const centerTitle = document.getElementById('center-title');
 const activityEl = document.getElementById('activity');
@@ -105,35 +105,86 @@ document.getElementById('new-skill').onclick = () => {
   active = id; renderSkills(); renderCenter(); log('action', `Created skill: ${name}`);
 };
 const promptEl = document.getElementById('prompt');
-const sendEl = document.getElementById('send');
 let ws = null;
+function flushPending(){
+  if(pendingInstruction && ws && ws.readyState===1){
+    ws.send(JSON.stringify({ instruction: pendingInstruction }));
+    log('thought', `Dispatched queued: ${pendingInstruction}`);
+    pendingInstruction = null;
+  }
+}
+const viewportImg = document.getElementById('viewport-img');
+const centerPlaceholder = document.getElementById('center-placeholder');
+function showFrame(b64){
+  if(!b64) return;
+  viewportImg.src = 'data:image/png;base64,' + b64;
+  viewportImg.classList.add('active');
+  centerPlaceholder.style.display='none';
+}
+viewportImg.onclick = (e)=>{
+  const rect = viewportImg.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  if(ws && ws.readyState===1) ws.send(JSON.stringify({ type:'input', skill_id: active, target_domain: skills.find(s=>s.id===active)?.domain||'', x, y }));
+  log('action', `HITL click ${Math.round(x)},${Math.round(y)}`);
+};
 function connectWS(){
   if(ws) try{ ws.close(); }catch{}
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws/${active}`);
-  ws.onmessage = (ev) => { try{ const m=JSON.parse(ev.data); log(m.state==='RUNNING'?'action':'thought', m.thought||ev.data); }catch{ log('thought', ev.data); } };
-  ws.onopen = () => log('thought', `WS connected → ${active}`);
+  ws.onmessage = (ev) => {
+    try{
+      const m=JSON.parse(ev.data);
+      if(m.frame && m.frame.b64){
+        showFrame(m.frame.b64);
+        if(m.frame.url) log('thought', `frame: ${m.frame.url.slice(0,60)}`);
+        return;
+      }
+      if(m.b64){
+        showFrame(m.b64);
+        return;
+      }
+      log(m.state==='RUNNING'?'action': m.state==='PAUSED'?'correction':'thought', m.thought||m.frame||ev.data);
+      if(m.blocker) log('correction', `blocker: ${m.blocker.type} - ${m.blocker.reason}`);
+    } catch{ log('thought', ev.data); }
+  };
+  ws.onopen = () => { log('thought', `WS connected → ${active}`); flushPending(); };
   ws.onclose = () => log('correction', `WS closed`);
+  ws.onerror = () => log('correction', `WS error → ${active}`);
 }
-sendEl.onclick = () => {
+function submitPrompt(){
   const v = promptEl.value.trim();
   if(!v) return;
   log('action', `Instruction: ${v}`);
-  // auto-create skill if domain-like
   const m = v.toLowerCase().match(/([a-z0-9.-]+\.[a-z]{2,})/);
-  let target = skills.find(s=> active===s.id);
+  let newSkill = false;
   if(m && !skills.find(s=> s.domain.includes(m[1]) || s.name.toLowerCase().includes(m[1].split('.')[0]))){
     const name = `login ${m[1].split('.')[0]}`;
     const id = name.replace(/[^a-z0-9]+/g,'-');
     skills.push({ id, name, domain: m[1] });
     active = id; renderSkills(); renderCenter(); log('thought', `Skill Dispatcher: created new skill '${name}'`);
+    newSkill = true;
+    pendingInstruction = v;
+    connectWS();
+  } else if(v.toLowerCase().includes('hacker') && !skills.find(s=> s.id.includes('hacker'))){
+    const id = 'hacker-news'; const name='hacker news'; const domain='news.ycombinator.com';
+    skills.push({ id, name, domain }); active=id; renderSkills(); renderCenter();
+    log('thought', `Skill Dispatcher: created new skill '${name}'`);
+    newSkill = true;
+    pendingInstruction = v;
     connectWS();
   }
-  if(ws && ws.readyState===1) ws.send(JSON.stringify({ instruction: v }));
-  else log('correction', 'WS not ready — will dispatch on reconnect');
+  if(!newSkill){
+    if(ws && ws.readyState===1) ws.send(JSON.stringify({ instruction: v }));
+    else { pendingInstruction = v; if(!ws || ws.readyState!==1) connectWS(); else flushPending(); log('thought', `Queuing until WS ready…`); }
+  }
   promptEl.value='';
-};
-promptEl.addEventListener('keydown', e=>{ if(e.key==='Enter') sendEl.click(); });
+  promptEl.style.height='48px';
+}
+promptEl.addEventListener('keydown', e=>{
+  if(e.key==='Enter' && !e.ctrlKey && !e.shiftKey){ e.preventDefault(); submitPrompt(); }
+});
+promptEl.addEventListener('input', ()=>{ promptEl.style.height='auto'; promptEl.style.height=Math.min(promptEl.scrollHeight,160)+'px'; });
 document.getElementById('toggle-bottom').onclick = () => {
   document.getElementById('app').classList.toggle('bottom-hidden');
   log('thought', document.getElementById('app').classList.contains('bottom-hidden') ? 'Bottom hidden — height reclaimed' : 'Bottom shown');

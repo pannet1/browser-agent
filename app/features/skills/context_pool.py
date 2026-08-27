@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from app.core.logger import logging_func
+from app.features.skills.manager import get_shared_paths
+
+logger = logging_func(__name__)
+
+
+class ContextPool:
+
+    def __init__(self) -> None:
+        self._contexts: dict[str, Any] = {}
+        self._pages: dict[str, Any] = {}
+
+    async def get_or_create(self, target_domain: str, playwright: Any | None = None) -> Any:
+        if target_domain in self._contexts:
+            return self._contexts[target_domain]
+        if playwright is None:
+            logger.info(f"context_pool mock for {target_domain}")
+            fake = FakeContext(target_domain)
+            self._contexts[target_domain] = fake
+            return fake
+        paths = get_shared_paths(target_domain)
+        storage: str | None = None
+        sp = paths["storage"]
+        if sp.exists():
+            try:
+                txt = sp.read_text().strip()
+                if txt and txt != "{}":
+                    import json
+                    json.loads(txt)
+                    storage = str(sp)
+            except Exception:
+                storage = None
+        browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+        ctx = await browser.new_context(storage_state=storage) if storage else await browser.new_context()
+        self._contexts[target_domain] = ctx
+        logger.info(f"context created for {target_domain}")
+        return ctx
+
+    async def get_page(self, target_domain: str, playwright: Any | None = None) -> Any:
+        if target_domain in self._pages:
+            return self._pages[target_domain]
+        ctx = await self.get_or_create(target_domain, playwright)
+        if hasattr(ctx, "new_page"):
+            page = await ctx.new_page()
+        else:
+            page = ctx  # mock
+        self._pages[target_domain] = page
+        return page
+
+    async def save_storage(self, target_domain: str) -> None:
+        ctx = self._contexts.get(target_domain)
+        if not ctx or not hasattr(ctx, "storage_state"):
+            return
+        paths = get_shared_paths(target_domain)
+        state = await ctx.storage_state()  # type: ignore[attr-defined]
+        Path(paths["storage"]).write_text(str(state))
+        logger.info(f"saved storage for {target_domain}")
+
+    def clear(self, target_domain: str | None = None) -> None:
+        if target_domain:
+            self._contexts.pop(target_domain, None)
+            self._pages.pop(target_domain, None)
+        else:
+            self._contexts.clear()
+            self._pages.clear()
+
+
+class FakeContext:
+
+    def __init__(self, domain: str) -> None:
+        self.domain = domain
+        self.url = f"https://{domain}"
+
+    async def new_page(self) -> Any:
+        return FakePage(self.url)
+
+
+class FakePage:
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+    async def goto(self, url: str, wait_until: str = "domcontentloaded") -> None:
+        self.url = url
+
+    async def screenshot(self, full_page: bool = False) -> bytes:
+        return b"fake"
+
+    @property
+    def accessibility(self) -> Any:
+        class A:
+            async def snapshot(self) -> dict[str, Any]:
+                return {"role": "WebArea"}
+
+        return A()

@@ -1,8 +1,23 @@
 [project]
 name = "browser-agent"
 version = "0.1.0"
-requires-python = ">=3.11"
-dependencies = ["fastapi", "uvicorn[standard]", "websockets"]
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "websockets",
+  "pendulum",
+  "jinja2",
+  "pydantic",
+  "playwright>=1.62.0",
+]
 
 [tool.uv]
 managed = true
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
