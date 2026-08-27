@@ -1,0 +1,11 @@
+.agents/
+data/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.orchestrator/
+.DS_Store
+.agents
