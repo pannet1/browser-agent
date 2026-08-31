@@ -56,6 +56,9 @@ class FakePage:
     async def click(self, selector: str, timeout: int = 1000) -> None:
         self.actions.append(("click", selector))
 
+    async def evaluate(self, script: str) -> str:
+        return ""
+
 
 def test_blocker_captcha() -> None:
     r = detect_blocker("please solve captcha", "https://irctc.co.in")
@@ -96,6 +99,7 @@ async def test_relay_key() -> None:
     res = await relay_key(page, "Enter")
     assert res["status"] == "ok"
     assert ("keyboard.press", "Enter") in page.actions
+    assert res["url"] == "https://example.com"
 
 
 @pytest.mark.asyncio

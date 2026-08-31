@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 from app.core.logger import logging_func
 
@@ -21,7 +22,43 @@ async def relay_click(page: Any, x: float, y: float, button: str = "left") -> di
 async def relay_key(page: Any, key: str) -> dict[str, Any]:
     logger.info(f"relay key {key}")
     await page.keyboard.press(key)  # type: ignore[attr-defined]
-    return {"status": "ok", "key": key}
+    if key.lower() in {"enter", "return"}:
+        # Keyboard presses do not wait for a client-side search route to
+        # finish. Give dev.to/Algolia time to update the URL and results.
+        try:
+            await page.wait_for_timeout(1500)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        await _fallback_devto_search(page)
+    return {"status": "ok", "key": key, "url": getattr(page, "url", "")}
+
+
+async def _fallback_devto_search(page: Any) -> None:
+    """Submit dev.to's search overlay when its client handler misses Enter."""
+    current = urlparse(getattr(page, "url", ""))
+    if current.hostname != "dev.to" or current.path.rstrip("/") not in {"", "/", "/search"}:
+        return
+    try:
+        query = await page.evaluate(
+            """() => {
+                const el = document.activeElement;
+                if (el instanceof HTMLInputElement && el.value.trim()) return el.value.trim();
+                const inputs = [...document.querySelectorAll('input')];
+                const search = inputs.find(input => {
+                    const hint = `${input.type} ${input.name} ${input.id} ${input.placeholder} ${input.className}`.toLowerCase();
+                    return input.value.trim() && (hint.includes('search') || hint.includes('query'));
+                });
+                return search?.value.trim() || inputs.find(input => input.value.trim())?.value.trim() || '';
+            }"""
+        )  # type: ignore[attr-defined]
+        if query:
+            destination = f"https://dev.to/search?q={quote_plus(query)}"
+            logger.info(f"dev.to search fallback navigate {destination}")
+            await page.goto(destination, wait_until="commit", timeout=20000)  # type: ignore[attr-defined]
+        else:
+            logger.info("dev.to search fallback skipped: no non-empty search input found")
+    except Exception as exc:
+        logger.info(f"dev.to search fallback skipped: {exc}")
 
 
 async def relay_type(page: Any, text: str) -> dict[str, Any]:

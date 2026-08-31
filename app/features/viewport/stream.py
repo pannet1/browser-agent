@@ -54,12 +54,17 @@ class ViewportStream:
             await asyncio.sleep(1.0 / max(self.fps, 1))
 
     async def capture_frame(self, page: Any) -> dict[str, Any]:
-        try:
-            png = await page.screenshot(full_page=False)  # type: ignore[attr-defined]
-            b64 = base64.b64encode(png).decode() if isinstance(png, (bytes, bytearray)) else ""
-        except Exception as e:
-            logger.info(f"Screenshot failed: {e}")
-            b64 = ""
+        b64 = ""
+        for attempt in range(3):
+            try:
+                png = await page.screenshot(full_page=False)  # type: ignore[attr-defined]
+                b64 = base64.b64encode(png).decode() if isinstance(png, (bytes, bytearray)) else ""
+                break
+            except Exception as e:
+                if attempt == 2:
+                    logger.info(f"Screenshot failed after retries: {e}")
+                else:
+                    await page.wait_for_timeout(100)  # type: ignore[attr-defined]
         try:
             ax = await page.accessibility.snapshot()  # type: ignore[attr-defined]
             ax_tree = str(ax)[:4000]

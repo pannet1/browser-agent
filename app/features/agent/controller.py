@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+from urllib.parse import quote_plus
 
 import pendulum
 
@@ -15,6 +17,29 @@ from app.core.logger import logging_func
 logger = logging_func(__name__)
 
 ALLOWED_ACTIONS: set[str] = {"navigate", "click", "type", "press", "wait", "extract", "auto_login", "snapshot"}
+
+
+def _is_search_instruction(instruction: str) -> bool:
+    lowered = instruction.lower()
+    return any(word in lowered for word in ("search", "look up", "find"))
+
+
+def _devto_search_url(instruction: str, target_domain: str) -> str:
+    """Return dev.to's canonical search route for an explicit search request."""
+    if target_domain.lower() != "dev.to" or not _is_search_instruction(instruction):
+        return ""
+    patterns = (
+        r"\bsearch\s+dev\.to\s+for\s+(.+)$",
+        r"\b(?:search|find)\s+(?:for\s+)?(.+?)\s+(?:on|in)\s+dev\.to\s*$",
+        r"\bsearch\s+(?:for\s+)?(.+)$",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, instruction, re.IGNORECASE)
+        if match:
+            query = match.group(1).strip()
+            if query:
+                return f"https://dev.to/search?q={quote_plus(query)}"
+    return ""
 
 
 class AgentController:
@@ -38,6 +63,9 @@ class AgentController:
             return {"url": getattr(page, "url", ""), "ax_tree": ""}
 
     def plan(self, instruction: str, skill_name: str, target_domain: str, url: str, ax_tree: str, traces: list[dict[str, Any]] | None) -> dict[str, Any]:
+        devto_url = _devto_search_url(instruction, target_domain)
+        if devto_url:
+            return {"thought": "use dev.to canonical search route", "action": "navigate", "value": devto_url}
         prompt = render_prompt(instruction, skill_name, target_domain, url, ax_tree, traces)
         if self.llm:
             raw = self.llm.complete(prompt)
@@ -47,6 +75,12 @@ class AgentController:
                     return data
             except Exception:
                 pass
+            if not raw:
+                return {
+                    "thought": "LLM exhausted all configured model attempts",
+                    "action": "stop",
+                    "_llm_failed": True,
+                }
         lowered = instruction.lower()
         if "login" in lowered:
             return {"thought": "need login", "action": "auto_login", "selector": "", "value": ""}
@@ -97,8 +131,40 @@ class AgentController:
         for step in range(max_steps):
             state = await self.perceive(page)
             plan = self.plan(instruction, skill_name, target_domain, state["url"], state["ax_tree"], traces)
+            if plan.get("_llm_failed"):
+                thought = plan.get("thought", "LLM unavailable")
+                await bus.publish(skill_id, {"state": State.PAUSED.value, "thought": thought, "action": "stop"})
+                return {"status": "paused", "reason": "LLM exhausted configured attempts", "traces": traces, "steps": step}
             await bus.publish(skill_id, {"state": State.RUNNING.value, "thought": plan.get("thought", ""), "action": plan.get("action", "")})
             result = await self.act(page, plan, skill_id)
+            if (
+                result.get("status") == "ok"
+                and plan.get("action") == "navigate"
+                and "/search?q=" in str(result.get("url") or plan.get("value") or "")
+            ):
+                # dev.to renders the result cards client-side after the
+                # navigation commit; keep the viewport on the route while
+                # that content is fetched and painted.
+                await navigation.wait_for(page, ms=3000)
+                if target_domain.lower() == "dev.to":
+                    await navigation.recover_devto_search(page)
+            if (
+                result.get("status") == "ok"
+                and plan.get("action") == "type"
+                and _is_search_instruction(instruction)
+            ):
+                submit = await self.act(
+                    page,
+                    {"action": "press", "value": "Enter", "thought": "submit search"},
+                    skill_id,
+                )
+                result["search_submit"] = submit.get("status", "")
+                # Search navigation is asynchronous after a keyboard submit;
+                # let the new route and its client-rendered results settle
+                # before taking the ReAct observation.
+                if submit.get("status") == "ok":
+                    await navigation.wait_for(page, ms=1500)
+            observation = await self.perceive(page)
             trace = {
                 "thought": plan.get("thought", ""),
                 "action": plan.get("action", ""),
@@ -106,6 +172,10 @@ class AgentController:
                 "value": plan.get("value", ""),
                 "result": result.get("status", ""),
                 "error": result.get("error", ""),
+                "observation": {
+                    "url": observation["url"],
+                    "ax_tree": observation["ax_tree"][:4000],
+                },
                 "at": pendulum.now("UTC").to_iso8601_string(),
             }
             traces.append(trace)

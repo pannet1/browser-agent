@@ -13,6 +13,8 @@ AX tree: {ax_tree}
 Recent traces:
 {traces}
 Respond with JSON: {{\"thought\":..., \"action\":..., \"selector\":..., \"value\":...}}
+For search instructions, type the query into the search field and then press
+Enter so the site's normal search route is submitted. Do not stop after typing.
 Allowed actions: navigate, click, type, press, wait, extract, auto_login
 """
 
@@ -34,6 +36,9 @@ def render_prompt(
     if traces:
         for t in traces[-3:]:
             trace_block += f"- {t.get('thought','')} -> {t.get('action','')} = {t.get('result','')}\n"
+            observation = t.get("observation", {})
+            if observation:
+                trace_block += f"  observation: URL={observation.get('url','')} AX={observation.get('ax_tree','')[:1200]}\n"
             if t.get("correction"):
                 trace_block += f"  correction: {t['correction']}\n"
     else:

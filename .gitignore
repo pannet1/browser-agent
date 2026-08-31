@@ -1,6 +1,8 @@
 .agents/
 data/
 scratch/
+.env
+.env.*
 .venv/
 __pycache__/
 *.pyc

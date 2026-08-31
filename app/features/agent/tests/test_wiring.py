@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from app.core.bus import bus
-from app.features.agent.controller import AgentController
+from app.features.agent.controller import AgentController, _devto_search_url
 from app.features.agent.healer import Healer
 from app.features.agent.prompt_templates import render_prompt
 
@@ -81,11 +81,38 @@ class FakeLLM:
         return '{"thought":"llm navigate","action":"navigate","selector":"","value":"https://example.com"}'
 
 
+class SearchLLM:
+
+    def complete(self, prompt: str) -> str:
+        return '{"thought":"search query","action":"type","selector":"input[type=search]","value":"esp32"}'
+
+
+class ExhaustedLLM:
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, prompt: str) -> str:
+        self.calls += 1
+        return ""
+
+
 def test_render_prompt_includes_traces() -> None:
-    traces = [{"thought": "t1", "action": "click", "result": "ok"}]
+    traces = [{
+        "thought": "t1",
+        "action": "click",
+        "result": "ok",
+        "observation": {"url": "https://example.com/results", "ax_tree": "results"},
+    }]
     prompt = render_prompt("do", "skill", "example.com", "https://example.com", "ax", traces)
     assert "t1" in prompt
     assert "example.com" in prompt
+    assert "results" in prompt
+
+
+def test_devto_search_uses_canonical_route() -> None:
+    assert _devto_search_url("search dev.to for esp32", "dev.to") == "https://dev.to/search?q=esp32"
+    assert _devto_search_url("find c++ on dev.to", "dev.to") == "https://dev.to/search?q=c%2B%2B"
 
 
 @pytest.mark.asyncio
@@ -101,6 +128,25 @@ async def test_controller_navigate_and_bus() -> None:
         events.append(q.get_nowait())
     assert any(e.get("state") == "RUNNING" for e in events)
     bus.unsubscribe("test-nav", q)
+
+
+@pytest.mark.asyncio
+async def test_controller_submits_search_after_typing() -> None:
+    page = FakePage()
+    ctrl = AgentController(llm=SearchLLM())
+    result = await ctrl.run("search dev.to for esp32", "search", "search", "dev.to", page, max_steps=1)
+    assert result["status"] == "ok"
+    assert ("goto", "https://dev.to/search?q=esp32") in page.actions
+    assert result["traces"][0]["observation"]["url"] == "https://dev.to/search?q=esp32"
+
+
+@pytest.mark.asyncio
+async def test_controller_stops_when_llm_is_exhausted() -> None:
+    llm = ExhaustedLLM()
+    result = await AgentController(llm=llm).run("search an example", "search", "search", "example.com", FakePage(), max_steps=6)
+    assert result["status"] == "paused"
+    assert result["reason"] == "LLM exhausted configured attempts"
+    assert llm.calls == 1
 
 
 @pytest.mark.asyncio

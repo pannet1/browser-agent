@@ -20,9 +20,11 @@ from app.features.viewport.stream import ViewportStream
 from app.features.agent.controller import AgentController
 from app.features.agent.llm import get_llm
 from app.features.agent.tools.irctc import prepare_login as prepare_irctc_login
+from app.features.agent.tools.navigation import recover_devto_search
 
 _pool = ContextPool()
 _streams: dict[str, ViewportStream] = {}
+_instruction_queues: dict[str, asyncio.Queue[str]] = {}
 _llm = get_llm(max_attempts=0)
 _agent = AgentController(llm=_llm)
 
@@ -60,6 +62,23 @@ async def post_client_log(payload: dict[str, object]) -> dict[str, str]:
     except Exception:
         pass
     return {"status": "ok"}
+
+
+@app.post("/api/dispatch")
+async def dispatch_instruction(payload: dict[str, str]) -> dict[str, object]:
+    """Inject a prompt through the same path used by the bottom panel."""
+    instruction = (payload.get("instruction") or "").strip()
+    requested_id = (payload.get("skill_id") or "").strip()
+    if not instruction:
+        return {"accepted": False, "error": "instruction is required"}
+    queue = _instruction_queues.get(requested_id) if requested_id else None
+    selected_id = requested_id
+    if queue is None and not requested_id and len(_instruction_queues) == 1:
+        selected_id, queue = next(iter(_instruction_queues.items()))
+    if queue is None:
+        return {"accepted": False, "error": "no active skill WebSocket", "skill_id": requested_id}
+    await queue.put(instruction)
+    return {"accepted": True, "skill_id": selected_id}
 
 
 @app.get("/api/logs")
@@ -135,10 +154,32 @@ async def _safe_send(ws: WebSocket, data: str) -> bool:
         return False
 
 
+async def _restore_page(page: object, destination: str) -> str:
+    """Navigate a saved skill without waiting for every page resource.
+
+    Some sites (including dev.to) keep loading resources for a long time or
+    never satisfy Playwright's ``domcontentloaded`` wait reliably.  A commit
+    means the browser has received the navigation response and is enough to
+    start the live viewport stream.
+    """
+    wait_until = "commit" if "dev.to" in destination else "domcontentloaded"
+    try:
+        await page.goto(destination, wait_until=wait_until, timeout=20000)  # type: ignore[attr-defined]
+        return destination
+    except Exception:
+        if not destination.startswith("https://"):
+            raise
+        fallback = destination.replace("https://", "http://", 1)
+        await page.goto(fallback, wait_until=wait_until, timeout=20000)  # type: ignore[attr-defined]
+        return fallback
+
+
 @app.websocket("/ws/{skill_id}")
 async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
     await websocket.accept()
     q = bus.subscribe(skill_id)
+    instruction_queue: asyncio.Queue[str] = asyncio.Queue()
+    _instruction_queues[skill_id] = instruction_queue
     await bus.publish(skill_id, {"state": "IDLE", "thought": f"connected to {skill_id}"})
     try:
         while True:
@@ -148,6 +189,12 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                 data = None
             except WebSocketDisconnect:
                 break
+
+            if data is None:
+                try:
+                    data = json.dumps({"instruction": instruction_queue.get_nowait()})
+                except asyncio.QueueEmpty:
+                    pass
 
             payload = {}
             if data is not None:
@@ -173,7 +220,19 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                     stream = _streams.get(sid) or _streams.get(skill_id)
                     if stream:
                         result = await stream.handle_input(page, payload)
-                        await bus.publish(skill_id, {"state": "RUNNING", "thought": f"HITL {payload.get('action', 'input')} forwarded: {result.get('status', 'unknown')}", "action": "hitl"})
+                        if (
+                            payload.get("action") == "key"
+                            and str(payload.get("key", "")).lower() in {"enter", "return"}
+                            and domain.lower() == "dev.to"
+                        ):
+                            recovered = await recover_devto_search(page)
+                            result["search_results"] = recovered.get("count", 0)
+                        detail = f"HITL {payload.get('action', 'input')} forwarded: {result.get('status', 'unknown')}"
+                        if result.get("url"):
+                            detail += f" → {result['url']}"
+                        if "search_results" in result:
+                            detail += f" (results: {result['search_results']})"
+                        await bus.publish(skill_id, {"state": "RUNNING", "thought": detail, "action": "hitl"})
                         # Persist cookies/local storage created by a human
                         # login.  This makes a successful IRCTC session survive
                         # an agent restart; credentials themselves are never
@@ -192,7 +251,7 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                 if domain:
                     try:
                         page = await _pool.get_page(domain, _pw)
-                        await page.goto(destination, wait_until="domcontentloaded", timeout=20000)
+                        destination = await _restore_page(page, destination)
                         stream = _streams.get(selected_id)
                         if not stream:
                             stream = ViewportStream(selected_id, fps=2)
@@ -209,8 +268,11 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                 routed_id = routed["skill_id"]
                 if routed_id != skill_id:
                     bus.unsubscribe(skill_id, q)
+                    if _instruction_queues.get(skill_id) is instruction_queue:
+                        _instruction_queues.pop(skill_id, None)
                     skill_id = routed_id
                     q = bus.subscribe(skill_id)
+                    _instruction_queues[skill_id] = instruction_queue
                 await publish_monitor({"skill_id": routed_id, "target_domain": target, "state": "RUNNING", "thought": f"received: {instruction}", "action": "dispatch", "source": "terminal", "instruction": instruction})
                 await bus.publish(skill_id, {"state": "RUNNING", "thought": f"received: {instruction}", "action": "dispatch"})
                 if not await _safe_send(websocket, json.dumps({"thought": f"Skill Dispatcher: {routed['skill_name']} -> {target} (new={routed['is_new']})", "state": "RUNNING", "skill": routed})):
@@ -289,6 +351,8 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                 pass
     finally:
         bus.unsubscribe(skill_id, q)
+        if _instruction_queues.get(skill_id) is instruction_queue:
+            _instruction_queues.pop(skill_id, None)
 
 
 _ui_index = UI_ROOT / "index.html"
