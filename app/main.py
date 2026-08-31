@@ -17,10 +17,14 @@ from app.features.skills.context_pool import ContextPool
 from app.features.skills.manager import list_skills as mgr_list_skills, get_skill, delete_skill, rename_skill
 from app.features.skills.router import route as skill_route
 from app.features.viewport.stream import ViewportStream
+from app.features.agent.controller import AgentController
+from app.features.agent.llm import get_llm
 from app.features.agent.tools.irctc import prepare_login as prepare_irctc_login
 
 _pool = ContextPool()
 _streams: dict[str, ViewportStream] = {}
+_llm = get_llm(max_attempts=0)
+_agent = AgentController(llm=_llm)
 
 app = FastAPI(title="browser-agent")
 configure_server_logging()
@@ -258,22 +262,18 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                             stream = ViewportStream(routed_id, fps=2)
                             _streams[routed_id] = stream
                             await stream.start(page)
-                        sq = bus.subscribe(routed_id)
-                        for _ in range(6):
-                            await asyncio.sleep(0.5)
-                            while not sq.empty():
-                                ev = sq.get_nowait()
-                                if "frame" in ev:
-                                    if not await _safe_send(websocket, json.dumps({"frame": ev["frame"], "skill_id": routed_id})):
-                                        break
-                                elif "blocker" in ev:
-                                    await _safe_send(websocket, json.dumps(ev))
-                            if websocket.client_state.name == "DISCONNECTED":
-                                break
-                        bus.unsubscribe(routed_id, sq)
+                        skill_name = routed.get("skill_name", "skill")
+                        result = await _agent.run(
+                            instruction=instruction,
+                            skill_id=routed_id,
+                            skill_name=skill_name,
+                            target_domain=target,
+                            page=page,
+                            max_steps=10,
+                        )
                         final_state = "PAUSED" if irctc_login else "IDLE"
-                        final_thought = "IRCTC login is ready for secure human verification" if irctc_login else f"browsing {target} done"
-                        await _safe_send(websocket, json.dumps({"thought": final_thought, "state": final_state, "action": "navigate"}))
+                        final_thought = result.get("thought", "done") if isinstance(result, dict) else "done"
+                        await _safe_send(websocket, json.dumps({"thought": final_thought, "state": final_state, "action": "navigate", "result": result}))
                     except Exception as exc:
                         await _safe_send(websocket, json.dumps({"thought": f"browse note: {target} → {exc} (try HITL in center)", "state": "PAUSED"}))
                         import traceback
