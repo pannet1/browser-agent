@@ -48,8 +48,8 @@
   #center-body { flex:1; display:flex; align-items:stretch; justify-content:stretch; background: #0b0d12; position: relative; border: 0; overflow:hidden; padding:0; }
   #center-placeholder { color: var(--muted); text-align:center; padding: 24px; }
   #center-placeholder b { color: var(--text); }
-  #viewport-img { width: 100%; height: 100%; object-fit: fill; display:none; border: 0; border-radius: 0; cursor: crosshair; outline: none; }
-  #viewport-img.active { display:block; flex:1; }
+  #viewport-canvas { width: 100%; height: 100%; display: none; border: 0; border-radius: 0; cursor: crosshair; outline: none; }
+  #viewport-canvas.active { display: block; flex: 1; }
   #activity { flex:1; overflow:auto; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.6; }
   .log { padding: 6px 8px; border-left: 2px solid #2a3048; margin-bottom: 8px; background: #1a1e2e; border-radius: 6px; }
   .log.thought { border-left-color: var(--accent); }
@@ -73,13 +73,13 @@
   </div>
   <div id="left-resizer" class="resizer" title="Drag to resize skills"></div>
   <div id="center" class="pane">
-    <div class="pane-head"><span>browser-agent — Live CDP Stream</span><span style="font-weight:400; text-transform:none; color:var(--muted); font-size:12px;">no URL bar • HITL interactive</span></div>
+    <div class="pane-head"><span>browser-agent — Live CDP Screencast</span><span style="font-weight:400; text-transform:none; color:var(--muted); font-size:12px;">no URL bar • HITL interactive</span></div>
     <div id="center-body">
       <div id="center-placeholder">
         <b id="center-title">Select a skill</b>
         <div style="margin-top:6px; color:var(--muted);">CDP canvas — Playwright viewport streams here.<br/>Click/type directly to handle captcha/OTP, agent resumes.</div>
       </div>
-      <img id="viewport-img" alt="viewport" tabindex="0" />
+      <canvas id="viewport-canvas" tabindex="0" title="Live browser — click, drag or type to take over"></canvas>
     </div>
   </div>
   <div id="right-resizer" class="resizer" title="Drag to resize activity"></div>
@@ -196,35 +196,110 @@ function flushPending(){
     pendingInstruction = null;
   }
 }
-const viewportImg = document.getElementById('viewport-img');
+const viewportCanvas = document.getElementById('viewport-canvas');
 const centerPlaceholder = document.getElementById('center-placeholder');
-function showFrame(b64){
-  if(!b64) return;
-  viewportImg.src = 'data:image/png;base64,' + b64;
-  viewportImg.classList.add('active');
-  centerPlaceholder.style.display='none';
+const vctx = viewportCanvas.getContext('2d');
+let remoteViewport = { width: 1280, height: 800 };
+let viewportLive = false;        // a frame has arrived for the active skill
+let latestBitmap = null;         // newest decoded frame
+let drawQueued = false;
+
+function buttonName(b){ return ({0:'left',1:'middle',2:'right'})[b] || 'left'; }
+function viewportCoords(e){
+  const rect = viewportCanvas.getBoundingClientRect();
+  if(!rect.width || !rect.height) return {x: 0, y: 0};
+  // Screencast frames show exactly the CSS viewport, so map the client area
+  // proportionally per-axis; this holds even if the pane stretches.
+  return {
+    x: (e.clientX - rect.left) * remoteViewport.width / rect.width,
+    y: (e.clientY - rect.top) * remoteViewport.height / rect.height,
+  };
 }
-viewportImg.onclick = (e)=>{
-  viewportImg.focus();
-  const rect = viewportImg.getBoundingClientRect();
-  const scaleX = viewportImg.naturalWidth / rect.width;
-  const scaleY = viewportImg.naturalHeight / rect.height;
-  const x = (e.clientX - rect.left) * scaleX;
-  const y = (e.clientY - rect.top) * scaleY;
-  if(ws && ws.readyState===1) ws.send(JSON.stringify({ type:'input', action:'click', skill_id: active, target_domain: skills.find(s=>s.id===active)?.domain||'', x, y }));
-  log('action', `HITL click ${Math.round(x)},${Math.round(y)}`);
-};
-function sendViewportInput(message, description){
+function showFrame(msg){
+  const f = msg.frame || msg;
+  if(!f.b64) return;
+  const mime = f.mime || 'image/png';
+  const bin = atob(f.b64);
+  const bytes = new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+  createImageBitmap(new Blob([bytes], {type: mime})).then(bitmap=>{
+    latestBitmap = bitmap;
+    viewportLive = true;
+    viewportCanvas.classList.add('active');
+    centerPlaceholder.style.display='none';
+    scheduleDraw();
+  }).catch(()=>{ /* decode hiccup — the next frame replaces it */ });
+}
+function scheduleDraw(){
+  if(drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(()=>{ drawQueued = false; drawFrame(); });
+}
+function drawFrame(){
+  if(!latestBitmap || !viewportLive) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = viewportCanvas.clientWidth, h = viewportCanvas.clientHeight;
+  if(!w || !h) return;
+  const pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+  if(viewportCanvas.width !== pw || viewportCanvas.height !== ph){
+    viewportCanvas.width = pw;
+    viewportCanvas.height = ph;
+  }
+  vctx.imageSmoothingEnabled = true;
+  vctx.drawImage(latestBitmap, 0, 0, pw, ph);
+}
+window.addEventListener('resize', scheduleDraw);
+function sendViewportInput(message, description, silent){
   if(ws && ws.readyState===1){
     ws.send(JSON.stringify({ ...message, skill_id: active, target_domain: skills.find(s=>s.id===active)?.domain||'' }));
-    log('action', description);
+    if(!silent) log('action', description);
   }
 }
+// ---- pointer relay: down/move/up gives clicks, drags and text selection;
+// ---- throttled hover moves keep hover menus visibly reactive. A trailing
+// ---- mousedown never sticks: pointerup always follows with its own event.
+let pointerDown = null;          // {button}
+let hoverLast = null;            // last relayed hover/drag position
+let hoverStamp = 0;              // ms timestamp of last relayed move
+function relayMoveThrottled(x, y){
+  const now = performance.now();
+  const moved = !hoverLast || Math.hypot(x - hoverLast.x, y - hoverLast.y) >= 2;
+  if(!moved || now - hoverStamp < 40) return;
+  hoverLast = {x, y};
+  hoverStamp = now;
+  sendViewportInput({type:'input', action:'move', x, y}, '', true);
+}
+viewportCanvas.addEventListener('contextmenu', e => e.preventDefault());
+viewportCanvas.addEventListener('pointerdown', e=>{
+  if(!viewportLive) return;
+  viewportCanvas.focus();
+  const {x, y} = viewportCoords(e);
+  const button = buttonName(e.button);
+  pointerDown = {button};
+  viewportCanvas.setPointerCapture?.(e.pointerId);
+  sendViewportInput({type:'input', action:'down', x, y, button}, `HITL mousedown ${button} ${Math.round(x)},${Math.round(y)}`);
+});
+viewportCanvas.addEventListener('pointermove', e=>{
+  if(!viewportLive) return;
+  const {x, y} = viewportCoords(e);
+  if(pointerDown){
+    relayMoveThrottled(x, y);     // drag
+    return;
+  }
+  relayMoveThrottled(x, y);       // hover
+});
+viewportCanvas.addEventListener('pointerup', e=>{
+  if(!viewportLive) return;
+  const {x, y} = viewportCoords(e);
+  const button = pointerDown?.button || buttonName(e.button);
+  pointerDown = null;
+  sendViewportInput({type:'input', action:'up', x, y, button}, `HITL mouse up ${button}`);
+});
 function forwardViewportKey(e){
   // Browser shortcuts should remain local except for keys intended for the
   // remote page. Text input is sent as text; navigation/editing keys preserve
   // Playwright's native key semantics.
-  if(!viewportImg.classList.contains('active')) return;
+  if(!viewportLive) return;
   if(e.target === promptEl || e.target.matches?.('input, textarea, [contenteditable="true"]')) return;
   if(e.ctrlKey || e.metaKey || e.altKey) return;
   e.preventDefault();
@@ -235,25 +310,23 @@ function forwardViewportKey(e){
   }
 }
 function forwardViewportPaste(e){
-  if(!viewportImg.classList.contains('active')) return;
+  if(!viewportLive) return;
   if(e.target === promptEl || e.target.matches?.('input, textarea, [contenteditable="true"]')) return;
   const text=e.clipboardData?.getData('text') || '';
   if(!text) return;
   e.preventDefault();
   sendViewportInput({type:'input', action:'type', text}, `HITL paste ${text.length} chars`);
 }
-// The screenshot is an <img>, and Firefox does not consistently preserve its
-// focus while its src is replaced with each streamed frame. Capture keys at
-// document level instead; a click in the pane still sets the remote page's
-// focus through Playwright.
+// The canvas holds focus only after a click inside the pane, and the prompt
+// textarea must keep typing to itself; capture keys at document level and
+// filter by target. A click in the pane still sets the remote page's focus
+// through Playwright.
 document.addEventListener('keydown', forwardViewportKey);
 document.addEventListener('paste', forwardViewportPaste);
-viewportImg.addEventListener('wheel', (e)=>{
-  if(!viewportImg.classList.contains('active')) return;
+viewportCanvas.addEventListener('wheel', (e)=>{
+  if(!viewportLive) return;
   e.preventDefault();
-  const rect=viewportImg.getBoundingClientRect();
-  const x=(e.clientX-rect.left)*(viewportImg.naturalWidth/rect.width);
-  const y=(e.clientY-rect.top)*(viewportImg.naturalHeight/rect.height);
+  const {x, y} = viewportCoords(e);
   sendViewportInput(
     {type:'input', action:'scroll', delta_y:e.deltaY, x, y},
     `HITL scroll ${Math.round(e.deltaY)}`,
@@ -262,19 +335,35 @@ viewportImg.addEventListener('wheel', (e)=>{
 function connectWS(){
   if(!active) return;
   if(ws) try{ ws.close(); }catch{}
+  // Frames from the previous skill do not carry over; require a fresh frame
+  // before the pane accepts pointer input for the new one.
+  viewportLive = false;
+  latestBitmap = null;
+  pointerDown = null;
+  viewportCanvas.classList.remove('active');
+  centerPlaceholder.style.display='';
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws/${active}`);
   ws.onmessage = (ev) => {
     try{
       const m=JSON.parse(ev.data);
       if(m.frame && m.frame.b64){
-        showFrame(m.frame.b64);
+        showFrame(m);
         return;
       }
       if(m.b64){
-        showFrame(m.b64);
+        showFrame(m);
         return;
       }
+      if(m.viewport && m.viewport.width && m.viewport.height){
+        remoteViewport = m.viewport;   // for cursor → page coordinate mapping
+        return;
+      }
+      if(m.stream === 'started'){
+        log('thought', `Viewport stream live — ${m.mode === 'cdp' ? 'CDP screencast (video rate)' : 'screenshot fallback (low FPS)'}; click/drag/type in the center pane to steer`);
+        return;
+      }
+      if(m.stream === 'stopped'){ return; }
       if(m.skill && m.skill.skill_id){
         const routedId=m.skill.skill_id;
         const routedDomain=m.skill.target_domain || skills.find(s=>s.id===active)?.domain || '';
@@ -304,6 +393,12 @@ function connectWS(){
 function submitPrompt(){
   const v = promptEl.value.trim();
   if(!v) return;
+  histIdx = null;
+  histDraft = '';
+  if(promptHistory[promptHistory.length-1] !== v){
+    promptHistory.push(v);
+    savePromptHistory();
+  }
   log('action', `Instruction: ${v}`);
   const m = v.toLowerCase().match(/([a-z0-9.-]+\.[a-z]{2,})/);
   let newSkill = false;
@@ -331,9 +426,43 @@ function submitPrompt(){
   promptEl.style.height='48px';
 }
 promptEl.addEventListener('keydown', e=>{
+  if(e.key==='ArrowUp' || e.key==='ArrowDown') historyNavigate(e);
   if(e.key==='Enter' && !e.ctrlKey && !e.shiftKey){ e.preventDefault(); submitPrompt(); }
 });
 promptEl.addEventListener('input', ()=>{ promptEl.style.height='auto'; promptEl.style.height=Math.min(promptEl.scrollHeight,160)+'px'; });
+// ---- prompt history: ArrowUp / ArrowDown step through previously sent
+// ---- instructions. History persists across reloads; browsing the history
+// ---- keeps the in-progress draft and restores it when you return past the
+// ---- newest entry. Navigation only commits when the caret sits on the
+// ---- first (up) or last (down) line of multi-line drafts.
+let promptHistory = [];
+try{ promptHistory = JSON.parse(localStorage.getItem('browser-agent-prompt-history') || '[]'); }catch{}
+let histIdx = null;   // index into promptHistory while browsing; null = live draft
+let histDraft = '';   // unsent text to restore when leaving history downward
+function savePromptHistory(){
+  try{ localStorage.setItem('browser-agent-prompt-history', JSON.stringify(promptHistory.slice(-100))); }catch{}
+}
+function historyNavigate(e){
+  if(e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+  const up = e.key === 'ArrowUp';
+  const down = e.key === 'ArrowDown';
+  if(!promptHistory.length) return;
+  if(down && histIdx === null) return;
+  const ta = promptEl;
+  const pos = ta.selectionStart;
+  // multi-line drafts: only navigate when the caret has nowhere to go locally
+  if(up && ta.value.slice(0, pos).includes('\n')) return;
+  if(down && ta.value.slice(pos).includes('\n')) return;
+  if(histIdx === null){ histDraft = ta.value; histIdx = promptHistory.length; }
+  if(up && histIdx === 0){ e.preventDefault(); return; }
+  histIdx += up ? -1 : 1;
+  if(histIdx >= promptHistory.length){ histIdx = null; ta.value = histDraft; }
+  else { ta.value = promptHistory[histIdx]; }
+  e.preventDefault();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  promptEl.style.height='auto';
+  promptEl.style.height=Math.min(promptEl.scrollHeight,160)+'px';
+}
 document.getElementById('toggle-bottom').onclick = () => {
   document.getElementById('app').classList.toggle('bottom-hidden');
   log('thought', document.getElementById('app').classList.contains('bottom-hidden') ? 'Bottom hidden — height reclaimed' : 'Bottom shown');

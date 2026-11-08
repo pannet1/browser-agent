@@ -84,7 +84,8 @@ async def test_ui_wiring_bottom_input_to_ws() -> None:
     assert client.get("/api/health").json()["status"] == "ok"
     html = client.get("/").text
     assert 'id="prompt"' in html
-    assert 'Live CDP Stream' in html
+    assert 'Live CDP Screencast' in html
+    assert 'id="viewport-canvas"' in html  # interactive canvas, not a passive <img>
     with client.websocket_connect("/ws/test-terminal-wiring") as ws:
         ws.send_text(json.dumps({"instruction": "login to example.com"}))
         data = ws.receive_text()

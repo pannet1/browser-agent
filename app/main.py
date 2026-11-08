@@ -25,7 +25,7 @@ from app.features.agent.tools.navigation import recover_devto_search
 _pool = ContextPool()
 _streams: dict[str, ViewportStream] = {}
 _instruction_queues: dict[str, asyncio.Queue[str]] = {}
-_llm = get_llm(max_attempts=0)
+_llm = get_llm()
 _agent = AgentController(llm=_llm)
 
 app = FastAPI(title="browser-agent")
@@ -232,6 +232,10 @@ async def ws_skill(websocket: WebSocket, skill_id: str) -> None:
                             detail += f" → {result['url']}"
                         if "search_results" in result:
                             detail += f" (results: {result['search_results']})"
+                        # Hover moves stream continuously with the live
+                        # screencast; relay them without logging or saving.
+                        if payload.get("action") == "move":
+                            continue
                         await bus.publish(skill_id, {"state": "RUNNING", "thought": detail, "action": "hitl"})
                         # Persist cookies/local storage created by a human
                         # login.  This makes a successful IRCTC session survive

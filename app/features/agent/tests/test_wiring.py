@@ -189,3 +189,57 @@ async def test_controller_llm_plan() -> None:
     ctrl = AgentController(llm=FakeLLM(), vault=FakeVault())
     result = await ctrl.run("login with llm", "with-creds", "login", "example.com", page, max_steps=1)
     assert result["traces"][0]["thought"] == "llm login"
+
+
+class TestOrcaLLMParsing:
+    def test_strip_code_fences(self):
+        from app.features.agent.llm import _strip_code_fences
+        assert _strip_code_fences('{"action": "click"}') == '{"action": "click"}'
+        assert _strip_code_fences('```json\n{"action": "click"}\n```') == '{"action": "click"}'
+        assert _strip_code_fences('```\n{"action": "click"}\n```') == '{"action": "click"}'
+        assert _strip_code_fences('plain text') == 'plain text'
+
+    def test_get_llm_returns_orca_adapter(self):
+        import app.features.agent.llm as llm_mod
+        llm_mod._orca_default_llm = None
+        adapter = llm_mod.get_llm()
+        from app.features.agent.llm import OrcaLLM
+        assert isinstance(adapter, OrcaLLM)
+
+    def test_orca_complete_reads_output_file(self, tmp_path, monkeypatch):
+        """The runner writes the final message to the -o path; capture it."""
+        import app.features.agent.llm as llm_mod
+
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured["cmd"] = cmd
+            out_path = cmd[cmd.index("-o") + 1]
+            with open(out_path, "w") as f:
+                f.write('{"thought": "hi", "action": "click"}')
+            class P:
+                returncode = 0
+                stderr = ""
+                stdout = ""
+            return P()
+
+        monkeypatch.setattr(llm_mod.subprocess, "run", fake_run)
+        adapter = llm_mod.OrcaLLM()
+        result = adapter.complete("plan please")
+        assert result == '{"thought": "hi", "action": "click"}'
+        assert "-s" in captured["cmd"] and "read-only" in captured["cmd"]
+        assert captured["cmd"][-1] == "plan please"
+
+    def test_orca_complete_failure_returns_empty(self, monkeypatch):
+        import app.features.agent.llm as llm_mod
+
+        def fake_run(cmd, **kwargs):
+            class P:
+                returncode = 1
+                stderr = "boom"
+                stdout = ""
+            return P()
+
+        monkeypatch.setattr(llm_mod.subprocess, "run", fake_run)
+        adapter = llm_mod.OrcaLLM()
+        assert adapter.complete("x") == ""

@@ -46,9 +46,9 @@ class ContextPool:
             "Upgrade-Insecure-Requests": "1"
         }
         if storage:
-            ctx = await browser.new_context(storage_state=storage, user_agent=ua, extra_http_headers=headers)
+            ctx = await browser.new_context(storage_state=storage, user_agent=ua, extra_http_headers=headers, ignore_https_errors=True)
         else:
-            ctx = await browser.new_context(user_agent=ua, extra_http_headers=headers)
+            ctx = await browser.new_context(user_agent=ua, extra_http_headers=headers, ignore_https_errors=True)
         self._contexts[target_domain] = ctx
         self._browsers[target_domain] = browser
         logger.info(f"context created for {target_domain}")

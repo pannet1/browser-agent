@@ -7,6 +7,8 @@ from app.core.logger import logging_func
 
 logger = logging_func(__name__)
 
+BUTTON_NAMES = {0: "left", 1: "middle", 2: "right"}
+
 
 async def relay_click(page: Any, x: float, y: float, button: str = "left") -> dict[str, Any]:
     logger.info(f"relay click {x},{y} {button}")
@@ -75,10 +77,56 @@ async def relay_scroll(page: Any, delta_y: float, x: float | None = None, y: flo
     return {"status": "ok", "delta_y": delta_y, "x": x, "y": y}
 
 
+async def relay_move(page: Any, x: float, y: float) -> dict[str, Any]:
+    """Hover move. With the screencast running this keeps menus and
+    hover-activated UI visibly reactive while the human steers."""
+    logger.info(f"relay move {x},{y}")
+    try:
+        await page.mouse.move(x, y)  # type: ignore[attr-defined]
+        return {"status": "ok", "x": x, "y": y}
+    except Exception as exc:
+        logger.info(f"relay move failed {exc}")
+        return {"status": "error", "x": x, "y": y}
+
+
+async def relay_down(page: Any, x: float | None, y: float | None, button: str = "left") -> dict[str, Any]:
+    """Press a mouse button — starts a drag when later paired with moves."""
+    logger.info(f"relay down {button} at {x},{y}")
+    if x is not None and y is not None:
+        await page.mouse.move(x, y)  # type: ignore[attr-defined]
+    await page.mouse.down(button=button)  # type: ignore[attr-defined]
+    return {"status": "ok", "button": button}
+
+
+async def relay_up(page: Any, x: float | None, y: float | None, button: str = "left") -> dict[str, Any]:
+    logger.info(f"relay up {button} at {x},{y}")
+    if x is not None and y is not None:
+        await page.mouse.move(x, y)  # type: ignore[attr-defined]
+    await page.mouse.up(button=button)  # type: ignore[attr-defined]
+    return {"status": "ok", "button": button}
+
+
+async def relay_dblclick(page: Any, x: float, y: float, button: str = "left") -> dict[str, Any]:
+    logger.info(f"relay dblclick {x},{y} {button}")
+    await page.mouse.dblclick(x, y, button=button)  # type: ignore[attr-defined]
+    return {"status": "ok", "x": x, "y": y}
+
+
 def parse_ui_event(event: dict[str, Any]) -> dict[str, Any]:
     etype = event.get("action", event.get("type", ""))
     if etype == "click":
         return {"action": "click", "x": float(event.get("x", 0)), "y": float(event.get("y", 0))}
+    if etype == "dblclick":
+        return {"action": "dblclick", "x": float(event.get("x", 0)), "y": float(event.get("y", 0))}
+    if etype in {"down", "up"}:
+        return {
+            "action": etype,
+            "x": float(event["x"]) if event.get("x") is not None else None,
+            "y": float(event["y"]) if event.get("y") is not None else None,
+            "button": str(event.get("button", "left")),
+        }
+    if etype == "move":
+        return {"action": "move", "x": float(event.get("x", 0)), "y": float(event.get("y", 0))}
     if etype == "key":
         return {"action": "key", "key": str(event.get("key", ""))}
     if etype == "type":
